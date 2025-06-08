@@ -3,3 +3,4 @@ langchain
 google-generativeai 
 plotly 
 pandas
+langchain_community 
