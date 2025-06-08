@@ -1,614 +1,277 @@
 import streamlit as st
-import json
+import os
 import time
-from datetime import datetime, timedelta
-import pandas as pd
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
+from langchain.chains import ConversationChain
 
-# Try importing Google Generative AI
-try:
-    import google.generativeai as genai
-    GENAI_AVAILABLE = True
-except ImportError:
-    GENAI_AVAILABLE = False
-    st.warning("google-generativeai not installed. AI features will be limited.")
-
-# Try importing LangChain components with fallbacks
-try:
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    LANGCHAIN_GOOGLE_AVAILABLE = True
-except ImportError:
-    LANGCHAIN_GOOGLE_AVAILABLE = False
-
-try:
-    from langchain_core.messages import HumanMessage, SystemMessage
-except ImportError:
-    try:
-        from langchain.schema import HumanMessage, SystemMessage
-    except ImportError:
-        # Fallback: create simple message classes
-        class HumanMessage:
-            def __init__(self, content):
-                self.content = content
-        
-        class SystemMessage:
-            def __init__(self, content):
-                self.content = content
-        
-        LANGCHAIN_GOOGLE_AVAILABLE = False
-
-# Configure page
-st.set_page_config(
-    page_title="AI Engineering Academy - AI Tutor",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
+# Inisialisasi model Gemini
+llm = ChatGoogleGenerativeAI(
+    model="gemini-pro",
+    google_api_key=os.environ.get("GEMINI_API_KEY")
 )
 
-# Initialize session state
-def init_session_state():
-    if 'user_profile' not in st.session_state:
-        st.session_state.user_profile = None
-    if 'current_module' not in st.session_state:
-        st.session_state.current_module = None
-    if 'quiz_attempts' not in st.session_state:
-        st.session_state.quiz_attempts = {}
-    if 'module_progress' not in st.session_state:
-        st.session_state.module_progress = {}
-    if 'conversation_history' not in st.session_state:
-        st.session_state.conversation_history = []
-    if 'api_key' not in st.session_state:
-        st.session_state.api_key = ""
+# Fungsi untuk menghasilkan konten
+def generate_content(prompt):
+    response = llm.invoke([HumanMessage(content=prompt)])
+    return response.content
 
-init_session_state()
+# Parsing kuis dari respons Gemini
+def parse_quiz(response):
+    questions = []
+    blocks = response.split('\n\n')
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) >= 6:
+            question = lines[0]
+            options = lines[1:5]
+            correct_line = lines[5]
+            explanation = lines[6] if len(lines) > 6 else ""
+            correct = correct_line.split(':')[1].strip()
+            questions.append({
+                'question': question,
+                'options': options,
+                'correct': correct,
+                'explanation': explanation
+            })
+    return questions
 
-# AI Tutor Configuration
-class AITutor:
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.llm = None
-        
-        if api_key and GENAI_AVAILABLE:
-            try:
-                genai.configure(api_key=api_key)
-                if LANGCHAIN_GOOGLE_AVAILABLE:
-                    self.llm = ChatGoogleGenerativeAI(
-                        model="gemini-pro",
-                        google_api_key=api_key,
-                        temperature=0.7
-                    )
-                else:
-                    # Direct Gemini API usage as fallback
-                    self.model = genai.GenerativeModel('gemini-pro')
-            except Exception as e:
-                st.error(f"Error initializing AI: {str(e)}")
-    
-    def get_tutor_response(self, user_message, context=""):
-        if not self.api_key:
-            return "Please configure your Gemini API key first."
-        
-        if not GENAI_AVAILABLE:
-            return "Google Generative AI library not available. Please install: pip install google-generativeai"
-        
-        system_prompt = f"""
-        You are an AI Tutor for the AI Engineering Academy. Your role is to:
-        1. Adapt your teaching style based on student level (Beginner/Intermediate/Advanced)
-        2. Provide clear, engaging explanations
-        3. Offer multiple learning formats (visual, text, code examples)
-        4. Give constructive feedback and motivation
-        5. Guide students through their learning journey
-        
-        Current context: {context}
-        Student level: {st.session_state.user_profile.get('level', 'Unknown') if st.session_state.user_profile else 'Unknown'}
-        
-        Respond in a helpful, encouraging manner. Keep responses concise but comprehensive.
-        """
-        
-        try:
-            if self.llm and LANGCHAIN_GOOGLE_AVAILABLE:
-                # Use LangChain if available
-                messages = [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=user_message)
-                ]
-                response = self.llm(messages)
-                return response.content
-            else:
-                # Direct Gemini API usage
-                full_prompt = f"{system_prompt}\n\nUser: {user_message}\nAI Tutor:"
-                response = self.model.generate_content(full_prompt)
-                return response.text
-        except Exception as e:
-            return f"Error generating response: {str(e)}. Please check your API key and try again."
+# Menghasilkan kuis diagnostik
+def generate_diagnostic_quiz():
+    prompt = "Generate a 10-question multiple-choice quiz covering the full syllabus of AI and programming. Each question should have four options (a, b, c, d), indicate the correct answer, and provide an explanation for why the correct answer is right and why others are wrong."
+    response = generate_content(prompt)
+    return parse_quiz(response)
 
-# Module and Quiz Data
-MODULES = {
-    "Block 1": {
-        "Module 1": {
-            "title": "Introduction to AI",
-            "type": "flexible",
-            "estimated_time": "4-6 hours",
-            "description": "Foundational concepts in Artificial Intelligence"
-        },
-        "Module 2": {
-            "title": "Python for AI Engineering",
-            "type": "technical",
-            "estimated_time": "8-12 hours",
-            "description": "Python programming fundamentals for AI"
-        },
-        "Module 3": {
-            "title": "Math Essentials",
-            "type": "technical",
-            "estimated_time": "8-10 hours",
-            "description": "Mathematical foundations for AI"
-        },
-        "Module 4": {
-            "title": "Text EDA",
-            "type": "technical",
-            "estimated_time": "6-8 hours",
-            "description": "Exploratory Data Analysis for text data"
-        }
-    },
-    "Block 2": {
-        "Module 1": {
-            "title": "ML Foundations",
-            "type": "technical",
-            "estimated_time": "12-16 hours",
-            "description": "Machine Learning fundamentals"
-        },
-        "Module 2": {
-            "title": "ML Evaluation",
-            "type": "technical",
-            "estimated_time": "12-16 hours",
-            "description": "Model evaluation and validation"
-        },
-        "Module 3": {
-            "title": "ML Pipelines & Scikit-learn",
-            "type": "technical",
-            "estimated_time": "12-16 hours",
-            "description": "Building ML pipelines with Scikit-learn"
-        }
-    }
-}
+# Menghasilkan kuis per modul
+def generate_module_quiz(module_name, num_questions=5):
+    prompt = f"Generate a {num_questions}-question multiple-choice quiz for the module: {module_name}. Each question should have four options (a, b, c, d), indicate the correct answer, and provide an explanation for why the correct answer is right and why others are wrong."
+    response = generate_content(prompt)
+    return parse_quiz(response)
 
-DIAGNOSTIC_QUIZ = [
-    {
-        "question": "What is your experience with Python programming?",
-        "options": ["No experience", "Basic (variables, loops)", "Intermediate (OOP, libraries)", "Advanced (frameworks, optimization)"],
-        "category": "programming"
-    },
-    {
-        "question": "How familiar are you with machine learning concepts?",
-        "options": ["Never heard of it", "Basic understanding", "Can explain algorithms", "Have built ML models"],
-        "category": "ml"
-    },
-    {
-        "question": "What is your experience with data analysis?",
-        "options": ["No experience", "Basic (Excel, simple stats)", "Intermediate (pandas, visualization)", "Advanced (complex analysis, big data)"],
-        "category": "data"
-    },
-    {
-        "question": "How comfortable are you with mathematics (linear algebra, statistics)?",
-        "options": ["Not comfortable", "Basic understanding", "Comfortable with concepts", "Advanced mathematical background"],
-        "category": "math"
-    },
-    {
-        "question": "What is your experience with deep learning?",
-        "options": ["No experience", "Heard about it", "Basic understanding", "Have implemented neural networks"],
-        "category": "dl"
-    }
-]
-
-def calculate_user_level(responses):
+# Menilai kuis
+def assess_quiz(user_answers, questions):
     score = 0
-    for response in responses:
-        score += response
-    
-    if score <= 5:
-        return "Beginner"
-    elif score <= 10:
-        return "Intermediate"
+    feedback = []
+    for i, q in enumerate(questions):
+        user_answer = user_answers.get(f'q{i}')
+        if user_answer == q['correct']:
+            score += 1
+            feedback.append(f"{q['question']} - Benar!")
+        else:
+            feedback.append(f"{q['question']} - Salah. Penjelasan: {q['explanation']}")
+    return score, feedback
+
+# Menghasilkan konten adaptif
+def generate_adaptive_content(profile, module):
+    prompt = f"Provide detailed learning content suitable for a {profile} level student on the topic: {module}. Include explanations, examples, and key concepts."
+    return generate_content(prompt)
+
+# Menghasilkan aktivitas pembelajaran
+def generate_learning_activity(module, is_technical):
+    if is_technical:
+        prompt = f"Generate a hands-on coding activity for the module: {module}. Provide a task description and an example solution."
     else:
-        return "Advanced"
+        prompt = f"Generate a reflective writing or analysis activity for the module: {module}. Provide a task description."
+    return generate_content(prompt)
 
-# Sidebar Configuration
-def setup_sidebar():
-    with st.sidebar:
-        st.title("🤖 AI Tutor Settings")
-        
-        # API Key Input
-        api_key = st.text_input(
-            "Gemini API Key",
-            type="password",
-            value=st.session_state.api_key,
-            help="Enter your Google Gemini API key"
-        )
-        
-        if api_key != st.session_state.api_key:
-            st.session_state.api_key = api_key
-            st.rerun()
-        
-        if st.session_state.user_profile:
-            st.success(f"Level: {st.session_state.user_profile['level']}")
-            
-            st.subheader("📚 Progress Overview")
-            total_modules = sum(len(modules) for modules in MODULES.values())
-            completed = len([m for m in st.session_state.module_progress.values() if m.get('completed')])
-            progress_percentage = (completed / total_modules) * 100 if total_modules > 0 else 0
-            
-            st.progress(progress_percentage / 100)
-            st.write(f"Completed: {completed}/{total_modules} modules")
-            
-            if st.button("🔄 Reset Profile"):
-                for key in ['user_profile', 'current_module', 'quiz_attempts', 'module_progress']:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.rerun()
+# Menghasilkan rekap
+def generate_recap(module):
+    prompt = f"Provide a summary and key takeaways for the module: {module}."
+    return generate_content(prompt)
 
-# Main Application Functions
-def diagnostic_quiz():
-    st.title("🎯 Global Diagnostic Quiz")
-    st.markdown("This quiz will help us understand your current knowledge level and customize your learning experience.")
-    
-    if 'quiz_responses' not in st.session_state:
-        st.session_state.quiz_responses = []
-    
-    with st.form("diagnostic_quiz"):
-        responses = []
-        for i, q in enumerate(DIAGNOSTIC_QUIZ):
-            st.subheader(f"Question {i+1}")
-            st.write(q["question"])
-            response = st.radio(
-                "Select your answer:",
-                options=range(len(q["options"])),
-                format_func=lambda x, opts=q["options"]: opts[x],
-                key=f"q_{i}"
-            )
-            responses.append(response)
-        
-        submitted = st.form_submit_button("Complete Assessment")
-        
-        if submitted:
-            level = calculate_user_level(responses)
-            st.session_state.user_profile = {
-                'level': level,
-                'responses': responses,
-                'timestamp': datetime.now()
+# Dukungan percakapan
+def get_conversational_response(query):
+    if 'conversation' not in st.session_state:
+        st.session_state.conversation = ConversationChain(llm=llm)
+    return st.session_state.conversation.run(query)
+
+# Halaman Utama
+def main_page():
+    st.title("AI Engineering Academy")
+    st.write("Selamat datang di AI Tutor adaptif Anda!")
+    if st.button("Mulai Kuis Diagnostik"):
+        st.session_state.page = "diagnostic_quiz"
+        st.session_state.quiz_generated = False
+
+# Halaman Kuis Diagnostik
+def diagnostic_quiz_page():
+    st.title("Kuis Diagnostik")
+    if not st.session_state.get('quiz_generated', False):
+        st.session_state.quiz = generate_diagnostic_quiz()
+        st.session_state.quiz_generated = True
+    questions = st.session_state.quiz
+    user_answers = {}
+    for i, q in enumerate(questions):
+        st.write(q['question'])
+        user_answers[f'q{i}'] = st.radio(f"Pertanyaan {i+1}", q['options'], key=f"diag_q{i}")
+    if st.button("Kirim Jawaban"):
+        score, feedback = assess_quiz(user_answers, questions)
+        st.write("\n".join(feedback))
+        if score >= 8:
+            profile = "Advanced"
+        elif score >= 5:
+            profile = "Intermediate"
+        else:
+            profile = "Beginner"
+        st.session_state.profile = profile
+        st.session_state.format_prefs = {"video": 0, "text": 0, "visuals": 0}
+        st.write(f"Skor Anda: {score}/10. Profil Anda: {profile}")
+        if st.button("Lanjut ke Dashboard Modul"):
+            st.session_state.page = "module_dashboard"
+
+# Halaman Dashboard Modul
+def module_dashboard_page():
+    st.title("Dashboard Modul")
+    st.write(f"Profil: {st.session_state.profile}")
+    modules = [
+        {"name": "Intro to AI", "type": "flexible"},
+        {"name": "Python for AI Engineering", "type": "technical"},
+        {"name": "Data Cleaning & EDA", "type": "technical"},
+        {"name": "ML Foundations & Evaluation", "type": "technical"},
+        {"name": "Deep Learning & Transformers Basics", "type": "technical"},
+        {"name": "Prompting, RAG & Agentic Apps", "type": "flexible"},
+        {"name": "Ethics, Portfolio, Professional Growth", "type": "flexible"}
+    ]
+    for module in modules:
+        if st.button(module["name"]):
+            st.session_state.current_module = module
+            st.session_state.page = "module_page"
+            st.session_state.module_state = {
+                "entry_quiz_done": False,
+                "content_viewed": False,
+                "activity_done": False,
+                "final_quiz_done": False,
+                "start_time": time.time(),
+                "time_spent": 0
             }
-            st.success(f"Assessment complete! Your level: {level}")
-            st.rerun()
 
-def module_selection():
-    st.title("📚 Module Selection")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown("### Available Modules")
-        
-        for block_name, modules in MODULES.items():
-            with st.expander(f"📖 {block_name}", expanded=True):
-                for module_key, module_info in modules.items():
-                    col_mod, col_btn = st.columns([3, 1])
-                    
-                    with col_mod:
-                        status = "✅" if st.session_state.module_progress.get(f"{block_name}_{module_key}", {}).get('completed') else "⏳"
-                        st.write(f"{status} **{module_info['title']}**")
-                        st.write(f"*{module_info['description']}*")
-                        st.write(f"📊 Type: {module_info['type'].title()} | ⏱️ {module_info['estimated_time']}")
-                    
-                    with col_btn:
-                        if st.button(f"Start", key=f"start_{block_name}_{module_key}"):
-                            st.session_state.current_module = {
-                                'block': block_name,
-                                'module': module_key,
-                                'info': module_info
-                            }
-                            st.rerun()
-    
-    with col2:
-        if st.session_state.user_profile:
-            st.markdown("### 👤 Your Profile")
-            st.info(f"**Level:** {st.session_state.user_profile['level']}")
-            
-            # Recommendations based on level
-            if st.session_state.user_profile['level'] == 'Beginner':
-                st.markdown("**Recommended Path:**")
-                st.write("- Start with Block 1, Module 1")
-                st.write("- Focus on fundamentals")
-                st.write("- Take time with each concept")
-            elif st.session_state.user_profile['level'] == 'Intermediate':
-                st.markdown("**Recommended Path:**")
-                st.write("- You may skip basic concepts")
-                st.write("- Focus on practical applications")
-                st.write("- Use Explorer Mode when ready")
-            else:
-                st.markdown("**Recommended Path:**")
-                st.write("- Use Explorer Mode")
-                st.write("- Focus on advanced topics")
-                st.write("- Consider peer mentoring")
-
-def module_content():
-    if not st.session_state.current_module:
-        st.error("No module selected. Please go back to module selection.")
-        return
-    
+# Halaman Modul
+def module_page():
     module = st.session_state.current_module
-    module_key = f"{module['block']}_{module['module']}"
-    
-    st.title(f"📖 {module['info']['title']}")
-    st.markdown(f"**Block:** {module['block']} | **Type:** {module['info']['type'].title()}")
-    
-    # Progress tracking
-    if module_key not in st.session_state.module_progress:
-        st.session_state.module_progress[module_key] = {
-            'started': datetime.now(),
-            'entry_quiz_completed': False,
-            'content_viewed': False,
-            'activity_completed': False,
-            'final_quiz_completed': False,
-            'completed': False
-        }
-    
-    progress = st.session_state.module_progress[module_key]
-    
-    # Module steps
-    tab1, tab2, tab3, tab4 = st.tabs(["📝 Entry Quiz", "📚 Content", "🛠️ Activity", "✅ Final Quiz"])
-    
-    with tab1:
-        st.subheader("Entry Quiz")
-        if not progress['entry_quiz_completed']:
-            st.info("Complete this quick assessment to customize your learning path.")
-            
-            with st.form("entry_quiz"):
-                st.write("How familiar are you with the topics in this module?")
-                familiarity = st.slider("Familiarity Level", 0, 10, 5)
-                
-                st.write("What specific aspects would you like to focus on?")
-                focus_areas = st.multiselect(
-                    "Select focus areas:",
-                    ["Theory", "Practical Applications", "Code Examples", "Best Practices", "Advanced Concepts"]
-                )
-                
-                if st.form_submit_button("Complete Entry Quiz"):
-                    progress['entry_quiz_completed'] = True
-                    progress['familiarity'] = familiarity
-                    progress['focus_areas'] = focus_areas
-                    st.success("Entry quiz completed!")
-                    st.rerun()
-        else:
-            st.success("✅ Entry quiz completed!")
-            st.write(f"Familiarity level: {progress.get('familiarity', 0)}/10")
-            st.write(f"Focus areas: {', '.join(progress.get('focus_areas', []))}")
-    
-    with tab2:
-        st.subheader("Learning Content")
-        if not progress['entry_quiz_completed']:
-            st.warning("Please complete the entry quiz first.")
-        else:
-            # Content formats
-            format_choice = st.selectbox(
-                "Choose your preferred learning format:",
-                ["📹 Video", "📖 Reading", "🖼️ Visual", "💻 Code Examples"]
-            )
-            
-            # Simulated content based on format
-            if format_choice == "📹 Video":
-                st.video("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-                st.write("Watch this comprehensive video covering the key concepts.")
-            elif format_choice == "📖 Reading":
-                st.markdown(f"""
-                ## {module['info']['title']} - Comprehensive Guide
-                
-                This module covers essential concepts that every AI engineer should master.
-                
-                ### Key Learning Objectives:
-                - Understand core principles
-                - Apply theoretical knowledge
-                - Develop practical skills
-                - Build real-world applications
-                
-                ### Content Overview:
-                {module['info']['description']}
-                
-                *Continue reading the full material...*
-                """)
-            elif format_choice == "🖼️ Visual":
-                st.image("https://via.placeholder.com/600x400/4CAF50/FFFFFF?text=Learning+Diagram", 
-                        caption="Conceptual diagram for this module")
-                st.markdown("Visual learners benefit from diagrams, charts, and infographics.")
-            else:  # Code Examples
-                st.code("""
-# Example code for this module
-def main_concept():
-    \"\"\"
-    This function demonstrates the key concept
-    covered in this module.
-    \"\"\"
-    result = perform_operation()
-    return process_result(result)
+    st.title(module["name"])
+    profile = st.session_state.profile
+    module_state = st.session_state.module_state
+    is_technical = module["type"] == "technical"
 
-# Practice implementing this yourself!
-                """, language="python")
-            
-            if st.button("Mark Content as Viewed"):
-                progress['content_viewed'] = True
-                st.success("Content marked as viewed!")
-                st.rerun()
-    
-    with tab3:
-        st.subheader("Learning Activity")
-        if not progress['content_viewed']:
-            st.warning("Please view the content first.")
-        else:
-            if module['info']['type'] == 'technical':
-                st.markdown("### 💻 Coding Activity")
-                st.write("Complete the following coding exercise:")
-                
-                code_input = st.text_area(
-                    "Write your code here:",
-                    height=200,
-                    placeholder="# Your code here\n\n"
-                )
-                
-                if st.button("Submit Code"):
-                    if code_input.strip():
-                        progress['activity_completed'] = True
-                        progress['activity_code'] = code_input
-                        st.success("Activity completed!")
-                        st.rerun()
-                    else:
-                        st.error("Please write some code before submitting.")
-            
-            else:  # Flexible module
-                st.markdown("### 📝 Reflection Activity")
-                st.write("Complete the following reflection exercise:")
-                
-                reflection = st.text_area(
-                    "Your reflection:",
-                    height=150,
-                    placeholder="Share your thoughts and insights..."
-                )
-                
-                if st.button("Submit Reflection"):
-                    if reflection.strip():
-                        progress['activity_completed'] = True
-                        progress['activity_reflection'] = reflection
-                        st.success("Activity completed!")
-                        st.rerun()
-                    else:
-                        st.error("Please write your reflection before submitting.")
-            
-            if progress['activity_completed']:
-                st.success("✅ Activity completed!")
-    
-    with tab4:
-        st.subheader("Final Quiz")
-        if not progress['activity_completed']:
-            st.warning("Please complete the learning activity first.")
-        else:
-            quiz_key = f"{module_key}_final"
-            
-            # Check for quiz cooldown
-            last_attempt = st.session_state.quiz_attempts.get(quiz_key, {}).get('last_attempt')
-            if last_attempt:
-                time_diff = datetime.now() - last_attempt
-                if time_diff < timedelta(hours=2):
-                    remaining = timedelta(hours=2) - time_diff
-                    st.warning(f"Quiz cooldown active. Please wait {remaining} before retrying.")
-                    return
-            
-            st.info("Pass this quiz to complete the module and advance.")
-            
-            with st.form("final_quiz"):
-                # Sample quiz questions
-                q1 = st.radio(
-                    "Question 1: Which concept is most important in this module?",
-                    ["Option A", "Option B", "Option C", "Option D"]
-                )
-                
-                q2 = st.radio(
-                    "Question 2: How would you apply this knowledge?",
-                    ["Option A", "Option B", "Option C", "Option D"]
-                )
-                
-                q3 = st.text_area(
-                    "Question 3: Explain the main concept in your own words:",
-                    height=100
-                )
-                
-                submitted = st.form_submit_button("Submit Final Quiz")
-                
-                if submitted:
-                    # Simple scoring logic
-                    score = 75 + (len(q3.split()) if q3 else 0)  # Base score + bonus for explanation
-                    passed = score >= 70
-                    
-                    # Record attempt
-                    if quiz_key not in st.session_state.quiz_attempts:
-                        st.session_state.quiz_attempts[quiz_key] = {'attempts': 0}
-                    
-                    st.session_state.quiz_attempts[quiz_key]['attempts'] += 1
-                    st.session_state.quiz_attempts[quiz_key]['last_attempt'] = datetime.now()
-                    st.session_state.quiz_attempts[quiz_key]['last_score'] = score
-                    
-                    if passed:
-                        progress['final_quiz_completed'] = True
-                        progress['completed'] = True
-                        st.success(f"🎉 Congratulations! You passed with {score}%")
-                        st.balloons()
-                    else:
-                        st.error(f"Score: {score}%. You need 70% to pass. Review the material and try again in 2 hours.")
-                    
-                    st.rerun()
-
-def ai_chat():
-    st.title("💬 Chat with AI Tutor")
-    
-    if not st.session_state.api_key:
-        st.warning("Please configure your Gemini API key in the sidebar to use the AI Tutor chat.")
-        st.info("You can get a free API key from: https://makersuite.google.com/app/apikey")
-        return
-    
-    if not GENAI_AVAILABLE:
-        st.error("Google Generative AI library not installed. Please install it with:")
-        st.code("pip install google-generativeai")
-        return
-    
-    tutor = AITutor(st.session_state.api_key)
-    
-    # Display chat history
-    for message in st.session_state.conversation_history:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-    
-    # Chat input
-    if prompt := st.chat_input("Ask your AI Tutor anything..."):
-        # Add user message
-        st.session_state.conversation_history.append({"role": "user", "content": prompt})
-        
-        with st.chat_message("user"):
-            st.write(prompt)
-        
-        # Get AI response
-        context = f"Current module: {st.session_state.current_module}" if st.session_state.current_module else "Module selection"
-        
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                response = tutor.get_tutor_response(prompt, context)
-                st.write(response)
-        
-        # Add AI response
-        st.session_state.conversation_history.append({"role": "assistant", "content": response})
-
-# Main App
-def main():
-    setup_sidebar()
-    
-    # Main navigation
-    if not st.session_state.user_profile:
-        diagnostic_quiz()
+    # Kuis Masuk
+    if not module_state["entry_quiz_done"]:
+        st.subheader("Kuis Masuk")
+        if "entry_quiz" not in st.session_state:
+            st.session_state.entry_quiz = generate_module_quiz(module["name"])
+        questions = st.session_state.entry_quiz
+        user_answers = {}
+        for i, q in enumerate(questions):
+            st.write(q['question'])
+            user_answers[f'q{i}'] = st.radio(f"Pertanyaan {i+1}", q['options'], key=f"entry_q{i}")
+        if st.button("Kirim Kuis Masuk"):
+            score, feedback = assess_quiz(user_answers, questions)
+            st.write("\n".join(feedback))
+            st.write(f"Skor Anda: {score}/{len(questions)}")
+            module_state["entry_quiz_done"] = True
+            st.session_state.module_state = module_state
     else:
-        # Navigation menu
-        if st.session_state.current_module:
-            nav_option = st.selectbox(
-                "Navigation:",
-                ["📖 Current Module", "📚 Module Selection", "💬 AI Tutor Chat"],
-                key="main_nav"
-            )
+        # Pengiriman Konten
+        st.subheader("Konten Pembelajaran")
+        if "content" not in st.session_state:
+            st.session_state.content = generate_adaptive_content(profile, module["name"])
+        content = st.session_state.content
+        format_choice = st.selectbox("Pilih format:", ["Teks", "Video (placeholder)", "Visual (placeholder)"])
+        if format_choice == "Teks":
+            st.session_state.format_prefs["text"] += 1
+            st.write(content)
+        elif format_choice == "Video (placeholder)":
+            st.session_state.format_prefs["video"] += 1
+            st.write(f"Video: Konten untuk {module['name']} (tersedia dalam format video)")
         else:
-            nav_option = st.selectbox(
-                "Navigation:",
-                ["📚 Module Selection", "💬 AI Tutor Chat"],
-                key="main_nav"
-            )
-        
-        if nav_option == "📚 Module Selection":
-            st.session_state.current_module = None
-            module_selection()
-        elif nav_option == "📖 Current Module":
-            module_content()
-        elif nav_option == "💬 AI Tutor Chat":
-            ai_chat()
+            st.session_state.format_prefs["visuals"] += 1
+            st.write(f"Visual: Diagram dan ilustrasi untuk {module['name']}")
+        if st.button("Tandai Konten Dilihat"):
+            module_state["content_viewed"] = True
+            st.session_state.module_state = module_state
 
-if __name__ == "__main__":
-    main()
+        # Aktivitas Pembelajaran
+        if module_state["content_viewed"]:
+            st.subheader("Aktivitas Pembelajaran")
+            if "activity" not in st.session_state:
+                st.session_state.activity = generate_learning_activity(module["name"], is_technical)
+            st.write(st.session_state.activity)
+            response = st.text_area("Masukkan jawaban Anda:")
+            if st.button("Kirim Aktivitas") and response:
+                module_state["activity_done"] = True
+                st.session_state.module_state = module_state
+
+        # Mode Explorer atau Kuis Akhir
+        if module_state["content_viewed"] and module_state["activity_done"] or profile == "Advanced":
+            st.subheader("Kuis Akhir")
+            if profile == "Advanced" and not module_state["final_quiz_done"]:
+                st.write("Mode Explorer: Anda dapat mencoba kuis akhir sekarang.")
+            if "final_quiz" not in st.session_state:
+                st.session_state.final_quiz = generate_module_quiz(module["name"])
+            questions = st.session_state.final_quiz
+            user_answers = {}
+            for i, q in enumerate(questions):
+                st.write(q['question'])
+                user_answers[f'q{i}'] = st.radio(f"Pertanyaan {i+1}", q['options'], key=f"final_q{i}")
+            if st.button("Kirim Kuis Akhir"):
+                score, feedback = assess_quiz(user_answers, questions)
+                st.write("\n".join(feedback))
+                passing_score = len(questions) * 0.7
+                if score >= passing_score:
+                    st.write(f"Skor Anda: {score}/{len(questions)}. Anda lulus!")
+                    module_state["final_quiz_done"] = True
+                    st.session_state.module_state = module_state
+                else:
+                    st.write(f"Skor Anda: {score}/{len(questions)}. Anda belum lulus. Silakan tinjau kembali konten.")
+                    remediation = generate_content(f"Provide remediation content for {module['name']} where the student scored {score}/{len(questions)}.")
+                    st.write(remediation)
+                    del st.session_state["final_quiz"]  # Reset kuis untuk dicoba lagi
+
+        # Refleksi dan Konsolidasi
+        if module_state["final_quiz_done"]:
+            st.subheader("Rekap dan Refleksi")
+            recap = generate_recap(module["name"])
+            st.write(recap)
+            st.write("Refleksikan apa yang telah Anda pelajari dan bagaimana Anda dapat menerapkannya.")
+            reflection = st.text_area("Tulis refleksi Anda:")
+            if st.button("Kirim Refleksi") and reflection:
+                st.write("Terima kasih atas refleksi Anda!")
+                st.session_state.page = "module_dashboard"
+
+    # Pemantauan Kemajuan
+    current_time = time.time()
+    module_state["time_spent"] = current_time - module_state["start_time"]
+    st.write(f"Waktu yang dihabiskan: {int(module_state['time_spent'] / 60)} menit")
+    recommended_time = 8 * 60  # 8 jam dalam menit untuk contoh
+    if module_state["time_spent"] < recommended_time * 0.5:
+        st.write("Dorongan: Pertimbangkan untuk menghabiskan lebih banyak waktu di modul ini.")
+
+# Dukungan Percakapan
+def chat_support():
+    st.sidebar.title("AI Tutor")
+    query = st.sidebar.text_input("Tanyakan apa saja:")
+    if query:
+        response = get_conversational_response(query)
+        st.sidebar.write(response)
+
+# Simulasi Interaksi Peer-to-Peer
+def peer_interaction():
+    st.sidebar.subheader("Interaksi Peer")
+    if st.button("Cari Teman Belajar"):
+        st.sidebar.write("Rekomendasi: Anda dapat terhubung dengan 'Pengguna A' yang memiliki kesulitan serupa.")
+
+# Logika Navigasi
+if "page" not in st.session_state:
+    st.session_state.page = "main"
+
+if st.session_state.page == "main":
+    main_page()
+elif st.session_state.page == "diagnostic_quiz":
+    diagnostic_quiz_page()
+elif st.session_state.page == "module_dashboard":
+    module_dashboard_page()
+elif st.session_state.page == "module_page":
+    module_page()
+
+# Komponen Sidebar
+chat_support()
+peer_interaction()
