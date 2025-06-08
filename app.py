@@ -151,14 +151,21 @@ def create_ai_tutor_chain(llm, student_level):
     template = f"""
 You are an adaptive AI tutor for an AI Engineering Academy. You are {personality}.
 
-Student Level: {student_level}
-Previous conversation context: {{chat_history}}
-Current context: {{context}}
+You have access to detailed information about the student's current learning context:
+{{context}}
+
+Previous conversation: {{chat_history}}
 Student Question/Input: {{input}}
 
-Provide a helpful, educational response that matches the student's level. 
-If this is about a quiz question, provide feedback and explanation.
-If this is a general question, provide clear guidance.
+IMPORTANT: Always acknowledge the student's current module and activities when relevant. 
+For example, if they're working on "Machine Learning Basics" and haven't completed the video yet, 
+mention this in your response and provide targeted guidance.
+
+Provide a helpful, educational response that:
+1. Acknowledges their current learning context
+2. Matches their student level
+3. Provides specific guidance for their current activities
+4. Encourages progress on incomplete activities when appropriate
 
 Response:
 """
@@ -615,6 +622,91 @@ def update_progress(module_id, activity, status):
     st.session_state.progress_tracking[module_id]['progress'] = progress
     st.success(f"Progress updated! ({progress:.0f}% complete)")
 
+def get_current_user_context():
+    """Get detailed current user context"""
+    context = {
+        'student_level': st.session_state.student_profile['level'] if st.session_state.student_profile else 'Unknown',
+        'current_module': None,
+        'current_activities': [],
+        'progress_summary': {},
+        'completed_activities': [],
+        'next_activities': []
+    }
+    
+    # Get current module information
+    if st.session_state.current_module > 0:
+        current_module = MODULES[st.session_state.current_module - 1]
+        context['current_module'] = current_module
+        
+        # Get progress for current module
+        module_progress = st.session_state.progress_tracking.get(st.session_state.current_module, {})
+        
+        # Determine completed activities
+        activities = ['video_watched', 'reading_complete', 'reflection_complete', 'hands_on_complete']
+        completed = [act for act in activities if module_progress.get(act, False)]
+        remaining = [act for act in activities if not module_progress.get(act, False)]
+        
+        context['completed_activities'] = completed
+        context['next_activities'] = remaining
+        context['progress_summary'] = module_progress
+    
+    return context
+
+def display_user_context_sidebar():
+    """Display current user context in sidebar"""
+    user_context = get_current_user_context()
+    
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📍 Current Context")
+    
+    # Student level
+    level_emoji = {"beginner": "🌱", "intermediate": "📚", "advanced": "🚀"}
+    level = user_context['student_level']
+    st.sidebar.markdown(f"**Level:** {level_emoji.get(level, '📖')} {level.capitalize()}")
+    
+    # Current module
+    if user_context['current_module']:
+        module = user_context['current_module']
+        st.sidebar.markdown(f"**Current Module:**")
+        st.sidebar.markdown(f"📖 {module['title']}")
+        
+        # Progress bar
+        progress = user_context['progress_summary'].get('progress', 0)
+        st.sidebar.progress(progress / 100)
+        st.sidebar.markdown(f"Progress: {progress:.0f}%")
+        
+        # Completed activities
+        if user_context['completed_activities']:
+            st.sidebar.markdown("**✅ Completed:**")
+            for activity in user_context['completed_activities']:
+                activity_names = {
+                    'video_watched': '📺 Video',
+                    'reading_complete': '📝 Reading',
+                    'reflection_complete': '💭 Reflection',
+                    'hands_on_complete': '💻 Hands-On'
+                }
+                st.sidebar.markdown(f"• {activity_names.get(activity, activity)}")
+        
+        # Next activities
+        if user_context['next_activities']:
+            st.sidebar.markdown("**⏳ Next Steps:**")
+            for activity in user_context['next_activities']:
+                activity_names = {
+                    'video_watched': '📺 Watch Video',
+                    'reading_complete': '📝 Complete Reading',
+                    'reflection_complete': '💭 Write Reflection',
+                    'hands_on_complete': '💻 Do Hands-On Activity'
+                }
+                st.sidebar.markdown(f"• {activity_names.get(activity, activity)}")
+    else:
+        st.sidebar.markdown("**Current Module:** None selected")
+        st.sidebar.markdown("💡 *Select a module to start learning*")
+    
+    # Overall progress
+    total_modules = len(MODULES)
+    completed_modules = len([m for m in st.session_state.progress_tracking.values() if m.get('completed', False)])
+    st.sidebar.markdown(f"**Overall Progress:** {completed_modules}/{total_modules} modules")
+
 def display_ai_tutor_chat(llm):
     """Display conversational AI tutor interface"""
     st.header("💬 AI Tutor Chat")
@@ -627,78 +719,137 @@ def display_ai_tutor_chat(llm):
         st.warning("Complete the Global Assessment first for personalized tutoring.")
         return
     
-    student_level = st.session_state.student_profile['level']
+    # Display user context sidebar
+    display_user_context_sidebar()
     
-    st.markdown(f"""
-    **Your AI Tutor is ready to help!** 
-    
-    Current Level: **{student_level.capitalize()}**
-    
-    Ask me anything about:
-    - Course concepts and explanations
-    - Help with assignments
-    - Study strategies
-    - Career guidance in AI
-    """)
-    
-    # Display conversation history
-    for message in st.session_state.conversation_history:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-    
-    # Chat input
-    if prompt := st.chat_input("Ask your AI tutor anything..."):
-        # Add user message to history
-        st.session_state.conversation_history.append({"role": "user", "content": prompt})
-        
-        with st.chat_message("user"):
-            st.write(prompt)
-        
-        # Generate AI response
-        try:
-            chain = create_ai_tutor_chain(llm, student_level)
-            
-            # Create context from current progress
-            context = f"Student level: {student_level}, Current module: {st.session_state.current_module}"
-            if st.session_state.progress_tracking:
-                context += f", Progress: {st.session_state.progress_tracking}"
-            
-            response = chain.predict(
-                context=context, 
-                input=prompt,
-                chat_history=""
-            )
-            
-            # Add AI response to history
-            st.session_state.conversation_history.append({"role": "assistant", "content": response})
-            
-            with st.chat_message("assistant"):
-                st.write(response)
-                
-        except Exception as e:
-            st.error(f"Error generating response: {str(e)}")
-            st.write("Please check your API key and try again.")
-    
-    # Quick action buttons
-    st.markdown("---")
-    st.subheader("Quick Help")
-    
-    col1, col2, col3 = st.columns(3)
+    # Main chat interface with context-aware layout
+    col1, col2 = st.columns([2, 1])
     
     with col1:
-        if st.button("❓ Explain Current Topic"):
-            if st.session_state.current_module > 0:
-                current_module = MODULES[st.session_state.current_module - 1]
-                prompt = f"Can you explain {current_module['title']} in simple terms?"
-                # This would trigger the chat input processing
+        student_level = st.session_state.student_profile['level']
+        user_context = get_current_user_context()
+        
+        st.markdown(f"""
+        **Your AI Tutor is ready to help!** 
+        
+        I can see you're currently working on: **{user_context['current_module']['title'] if user_context['current_module'] else 'No module selected'}**
+        
+        Ask me anything about:
+        - Your current module and activities
+        - Course concepts and explanations
+        - Help with assignments
+        - Study strategies
+        - Career guidance in AI
+        """)
+        
+        # Display conversation history
+        for message in st.session_state.conversation_history:
+            with st.chat_message(message["role"]):
+                st.write(message["content"])
+        
+        # Chat input
+        if prompt := st.chat_input("Ask your AI tutor anything..."):
+            # Add user message to history
+            st.session_state.conversation_history.append({"role": "user", "content": prompt})
+            
+            with st.chat_message("user"):
+                st.write(prompt)
+            
+            # Generate AI response with detailed context
+            try:
+                chain = create_ai_tutor_chain(llm, student_level)
+                
+                # Create detailed context for AI
+                detailed_context = f"""
+Student Level: {student_level}
+Current Module: {user_context['current_module']['title'] if user_context['current_module'] else 'None'}
+Module Description: {user_context['current_module']['description'] if user_context['current_module'] else 'N/A'}
+Module Progress: {user_context['progress_summary'].get('progress', 0)}%
+Completed Activities: {', '.join(user_context['completed_activities']) if user_context['completed_activities'] else 'None'}
+Next Activities: {', '.join(user_context['next_activities']) if user_context['next_activities'] else 'None'}
+Overall Progress: {len([m for m in st.session_state.progress_tracking.values() if m.get('completed', False)])}/{len(MODULES)} modules completed
+"""
+                
+                response = chain.predict(
+                    context=detailed_context, 
+                    input=prompt,
+                    chat_history=""
+                )
+                
+                # Add AI response to history
+                st.session_state.conversation_history.append({"role": "assistant", "content": response})
+                
+                with st.chat_message("assistant"):
+                    st.write(response)
+                    
+            except Exception as e:
+                st.error(f"Error generating response: {str(e)}")
+                st.write("Please check your API key and try again.")
     
     with col2:
-        if st.button("💡 Study Tips"):
-            prompt = f"What are some effective study strategies for {student_level} level AI students?"
-    
-    with col3:
-        if st.button("🎯 Career Guidance"):
-            prompt = "What career paths are available in AI engineering?"
+        st.subheader("🎯 Context-Aware Actions")
+        
+        user_context = get_current_user_context()
+        
+        # Current module specific actions
+        if user_context['current_module']:
+            module = user_context['current_module']
+            st.markdown(f"**Current: {module['title']}**")
+            
+            if st.button("❓ Explain Current Module", key="explain_current"):
+                explanation_prompt = f"Please explain {module['title']} - {module['description']} in detail for my level"
+                st.session_state.conversation_history.append({"role": "user", "content": explanation_prompt})
+                st.rerun()
+            
+            # Activity-specific help
+            if user_context['next_activities']:
+                st.markdown("**Next Activity Help:**")
+                for activity in user_context['next_activities'][:2]:  # Show max 2
+                    activity_names = {
+                        'video_watched': 'Video Help',
+                        'reading_complete': 'Reading Help',
+                        'reflection_complete': 'Reflection Help',
+                        'hands_on_complete': 'Hands-On Help'
+                    }
+                    if st.button(f"💡 {activity_names.get(activity, activity)}", key=f"help_{activity}"):
+                        help_prompt = f"I need help with the {activity.replace('_', ' ')} activity for {module['title']}. What should I focus on?"
+                        st.session_state.conversation_history.append({"role": "user", "content": help_prompt})
+                        st.rerun()
+        
+        st.markdown("---")
+        
+        # General quick actions
+        st.markdown("**Quick Actions:**")
+        
+        if st.button("📚 Study Tips", key="study_tips"):
+            tips_prompt = f"Give me specific study tips for {student_level} level students learning AI"
+            st.session_state.conversation_history.append({"role": "user", "content": tips_prompt})
+            st.rerun()
+        
+        if st.button("🎯 What's Next?", key="whats_next"):
+            next_prompt = "Based on my current progress, what should I focus on next?"
+            st.session_state.conversation_history.append({"role": "user", "content": next_prompt})
+            st.rerun()
+        
+        if st.button("📊 Progress Review", key="progress_review"):
+            review_prompt = "Can you review my learning progress and give me feedback?"
+            st.session_state.conversation_history.append({"role": "user", "content": review_prompt})
+            st.rerun()
+        
+        if st.button("🚀 Career Guidance", key="career_guidance"):
+            career_prompt = "What career paths are available in AI engineering for someone at my level?"
+            st.session_state.conversation_history.append({"role": "user", "content": career_prompt})
+            st.rerun()
+        
+        # Learning statistics
+        st.markdown("---")
+        st.markdown("**📈 Quick Stats:**")
+        completed_modules = len([m for m in st.session_state.progress_tracking.values() if m.get('completed', False)])
+        st.metric("Modules Completed", f"{completed_modules}/{len(MODULES)}")
+        
+        if user_context['current_module']:
+            current_progress = user_context['progress_summary'].get('progress', 0)
+            st.metric("Current Module", f"{current_progress:.0f}%")
 
 if __name__ == "__main__":
     main()
