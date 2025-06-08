@@ -1,12 +1,40 @@
 import streamlit as st
-import google.generativeai as genai
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.schema import HumanMessage, SystemMessage
-from langchain.prompts import PromptTemplate
 import json
 import time
 from datetime import datetime, timedelta
 import pandas as pd
+
+# Try importing Google Generative AI
+try:
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
+except ImportError:
+    GENAI_AVAILABLE = False
+    st.warning("google-generativeai not installed. AI features will be limited.")
+
+# Try importing LangChain components with fallbacks
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    LANGCHAIN_GOOGLE_AVAILABLE = True
+except ImportError:
+    LANGCHAIN_GOOGLE_AVAILABLE = False
+
+try:
+    from langchain_core.messages import HumanMessage, SystemMessage
+except ImportError:
+    try:
+        from langchain.schema import HumanMessage, SystemMessage
+    except ImportError:
+        # Fallback: create simple message classes
+        class HumanMessage:
+            def __init__(self, content):
+                self.content = content
+        
+        class SystemMessage:
+            def __init__(self, content):
+                self.content = content
+        
+        LANGCHAIN_GOOGLE_AVAILABLE = False
 
 # Configure page
 st.set_page_config(
@@ -36,19 +64,30 @@ init_session_state()
 # AI Tutor Configuration
 class AITutor:
     def __init__(self, api_key):
-        if api_key:
-            genai.configure(api_key=api_key)
-            self.llm = ChatGoogleGenerativeAI(
-                model="gemini-pro",
-                google_api_key=api_key,
-                temperature=0.7
-            )
-        else:
-            self.llm = None
+        self.api_key = api_key
+        self.llm = None
+        
+        if api_key and GENAI_AVAILABLE:
+            try:
+                genai.configure(api_key=api_key)
+                if LANGCHAIN_GOOGLE_AVAILABLE:
+                    self.llm = ChatGoogleGenerativeAI(
+                        model="gemini-pro",
+                        google_api_key=api_key,
+                        temperature=0.7
+                    )
+                else:
+                    # Direct Gemini API usage as fallback
+                    self.model = genai.GenerativeModel('gemini-pro')
+            except Exception as e:
+                st.error(f"Error initializing AI: {str(e)}")
     
     def get_tutor_response(self, user_message, context=""):
-        if not self.llm:
+        if not self.api_key:
             return "Please configure your Gemini API key first."
+        
+        if not GENAI_AVAILABLE:
+            return "Google Generative AI library not available. Please install: pip install google-generativeai"
         
         system_prompt = f"""
         You are an AI Tutor for the AI Engineering Academy. Your role is to:
@@ -65,14 +104,21 @@ class AITutor:
         """
         
         try:
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_message)
-            ]
-            response = self.llm(messages)
-            return response.content
+            if self.llm and LANGCHAIN_GOOGLE_AVAILABLE:
+                # Use LangChain if available
+                messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_message)
+                ]
+                response = self.llm(messages)
+                return response.content
+            else:
+                # Direct Gemini API usage
+                full_prompt = f"{system_prompt}\n\nUser: {user_message}\nAI Tutor:"
+                response = self.model.generate_content(full_prompt)
+                return response.text
         except Exception as e:
-            return f"Error: {str(e)}"
+            return f"Error generating response: {str(e)}. Please check your API key and try again."
 
 # Module and Quiz Data
 MODULES = {
@@ -500,6 +546,12 @@ def ai_chat():
     
     if not st.session_state.api_key:
         st.warning("Please configure your Gemini API key in the sidebar to use the AI Tutor chat.")
+        st.info("You can get a free API key from: https://makersuite.google.com/app/apikey")
+        return
+    
+    if not GENAI_AVAILABLE:
+        st.error("Google Generative AI library not installed. Please install it with:")
+        st.code("pip install google-generativeai")
         return
     
     tutor = AITutor(st.session_state.api_key)
@@ -519,13 +571,14 @@ def ai_chat():
         
         # Get AI response
         context = f"Current module: {st.session_state.current_module}" if st.session_state.current_module else "Module selection"
-        response = tutor.get_tutor_response(prompt, context)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = tutor.get_tutor_response(prompt, context)
+                st.write(response)
         
         # Add AI response
         st.session_state.conversation_history.append({"role": "assistant", "content": response})
-        
-        with st.chat_message("assistant"):
-            st.write(response)
 
 # Main App
 def main():
