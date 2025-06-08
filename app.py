@@ -1,9 +1,10 @@
 import streamlit as st
 import google.generativeai as genai
-from langchain.llms import GoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain.memory import ConversationBufferMemory
+from langchain.schema import HumanMessage, SystemMessage
 import json
 import time
 from datetime import datetime, timedelta
@@ -127,8 +128,12 @@ GLOBAL_QUIZ = [
 def initialize_gemini(api_key):
     """Initialize Gemini AI with the provided API key"""
     try:
-        genai.configure(api_key=api_key)
-        llm = GoogleGenerativeAI(model="gemini-pro", google_api_key=api_key)
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-pro",
+            google_api_key=api_key,
+            temperature=0.7,
+            convert_system_message_to_human=True
+        )
         return llm
     except Exception as e:
         st.error(f"Error initializing Gemini: {str(e)}")
@@ -147,7 +152,8 @@ def create_ai_tutor_chain(llm, student_level):
 You are an adaptive AI tutor for an AI Engineering Academy. You are {personality}.
 
 Student Level: {student_level}
-Context: {{context}}
+Previous conversation context: {{chat_history}}
+Current context: {{context}}
 Student Question/Input: {{input}}
 
 Provide a helpful, educational response that matches the student's level. 
@@ -158,12 +164,15 @@ Response:
 """
     
     prompt = PromptTemplate(
-        input_variables=["context", "input"],
+        input_variables=["context", "input", "chat_history"],
         template=template
     )
     
-    memory = ConversationBufferMemory(memory_key="chat_history")
-    chain = LLMChain(llm=llm, prompt=prompt, memory=memory)
+    memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True
+    )
+    chain = LLMChain(llm=llm, prompt=prompt, memory=memory, verbose=False)
     
     return chain
 
@@ -522,14 +531,16 @@ def display_module_content(module, student_level, llm):
             if user_input and llm:
                 try:
                     chain = create_ai_tutor_chain(llm, student_level)
-                    response = chain.run(
+                    response = chain.predict(
                         context=f"Student is reflecting on {module['title']}",
-                        input=user_input
+                        input=user_input,
+                        chat_history=""
                     )
                     st.write("**AI Tutor Feedback:**")
                     st.write(response)
                 except Exception as e:
                     st.error(f"Error getting AI feedback: {str(e)}")
+                    st.write("Please check your API key configuration.")
         
         if st.button("💡 Complete Reflection"):
             update_progress(module['id'], 'reflection_complete', True)
@@ -652,7 +663,11 @@ def display_ai_tutor_chat(llm):
             if st.session_state.progress_tracking:
                 context += f", Progress: {st.session_state.progress_tracking}"
             
-            response = chain.run(context=context, input=prompt)
+            response = chain.predict(
+                context=context, 
+                input=prompt,
+                chat_history=""
+            )
             
             # Add AI response to history
             st.session_state.conversation_history.append({"role": "assistant", "content": response})
@@ -662,6 +677,7 @@ def display_ai_tutor_chat(llm):
                 
         except Exception as e:
             st.error(f"Error generating response: {str(e)}")
+            st.write("Please check your API key and try again.")
     
     # Quick action buttons
     st.markdown("---")
